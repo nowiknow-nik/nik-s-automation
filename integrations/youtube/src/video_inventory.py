@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import os
 import sys
 import uuid
 
@@ -149,6 +150,10 @@ def main():
         ).isoformat(),
         "source": "youtube_data_api",
         "api_version": "v3",
+
+        # Provenance (collection linkage pass). None when this builder
+        # runs standalone, outside collector.py.
+        "collection_id": os.environ.get("NIK_COLLECTION_ID"),
 
         "channel_id": channel_id,
 

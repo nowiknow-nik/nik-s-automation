@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -41,7 +42,7 @@ def get_channel(youtube):
 # SNAPSHOT
 # ---------------------------------------------------------
 
-def build_snapshot(channel):
+def build_snapshot(channel, collection_id=None):
     snippet = channel.get("snippet", {})
     statistics = channel.get("statistics", {})
     content_details = channel.get("contentDetails", {})
@@ -54,6 +55,11 @@ def build_snapshot(channel):
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "source": "youtube_data_api",
         "api_version": "v3",
+
+        # Provenance (collection linkage pass). None when this builder
+        # runs standalone, outside collector.py -- collector.py is the
+        # only thing that sets NIK_COLLECTION_ID before invoking it.
+        "collection_id": collection_id,
 
         "channel_id": channel.get("id"),
 
@@ -146,6 +152,8 @@ def save_snapshot(snapshot):
 def main():
     print("===== NIK YOUTUBE CHANNEL SNAPSHOT =====")
 
+    collection_id = os.environ.get("NIK_COLLECTION_ID")
+
     credentials = get_credentials()
 
     youtube = build(
@@ -156,7 +164,7 @@ def main():
 
     channel = get_channel(youtube)
 
-    snapshot = build_snapshot(channel)
+    snapshot = build_snapshot(channel, collection_id=collection_id)
 
     output_path = save_snapshot(snapshot)
 

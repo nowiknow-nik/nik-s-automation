@@ -47,6 +47,24 @@ def test_build_snapshot_has_required_metadata_fields():
     assert snapshot["channel_id"] == "UCsample000000000000000"
 
 
+def test_build_snapshot_collection_id_defaults_to_none():
+    """
+    Standalone runs (outside collector.py) never set NIK_COLLECTION_ID,
+    so build_snapshot's default must stay None rather than, say, an
+    empty string -- None is how this codebase already distinguishes
+    "not applicable" from a real value (see pagination_completed).
+    """
+    snapshot = build_snapshot(SAMPLE_CHANNEL)
+
+    assert snapshot["collection_id"] is None
+
+
+def test_build_snapshot_collection_id_passthrough():
+    snapshot = build_snapshot(SAMPLE_CHANNEL, collection_id="a-collection-run-id")
+
+    assert snapshot["collection_id"] == "a-collection-run-id"
+
+
 def test_build_snapshot_snapshot_id_is_unique_per_call():
     first = build_snapshot(SAMPLE_CHANNEL)
     second = build_snapshot(SAMPLE_CHANNEL)
