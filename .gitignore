@@ -1,0 +1,67 @@
+# ============================================================
+# NIK AUTOMATION - ROOT GITIGNORE
+# ============================================================
+
+# ------------------------------------------------------------
+# Private workspace content
+# ------------------------------------------------------------
+
+/Chatgpt Founder validations.docx
+/Content_Creation_Strategy.txt
+/Reasoning_Company_Operating_Templates.xlsx
+/Deep_Documentation/
+/details/
+/Video/
+/Volume_1_Mission_and_Vision.md
+/Volume_2_Audience.md
+/Volume_3_Editorial_Constitution.md
+/Volume_4_Research_Framework.md
+/Volume_5_Brand_Identity.md
+/Volume_6_Storytelling_System.md
+/Volume_7_Company_Operating_System.md
+/Volume_8_Brand_Name_and_Verbal_Identity.md
+/Volume_9_The_Character_Bible_of_NIK.md
+
+# ------------------------------------------------------------
+# Python environments
+# ------------------------------------------------------------
+
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.py[cod]
+
+# ------------------------------------------------------------
+# Credentials / secrets
+# ------------------------------------------------------------
+
+**/credentials/
+**/*token*.json
+**/*secret*.json
+**/*.env
+**/*.env.*
+**/*service-account*.json
+
+# ------------------------------------------------------------
+# Local logs / generated data
+# ------------------------------------------------------------
+
+**/logs/
+**/*.log
+**/*.tmp
+**/*.cache
+
+# ------------------------------------------------------------
+# OS / editor files
+# ------------------------------------------------------------
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ------------------------------------------------------------
+# Keep Git metadata itself
+# ------------------------------------------------------------
+
+!.gitignore
