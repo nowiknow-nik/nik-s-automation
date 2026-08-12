@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import json
 import sys
+import uuid
 
 from googleapiclient.discovery import build
 
@@ -101,12 +102,12 @@ def enrich_video_statistics(youtube, videos):
             if video_id in by_id:
                 item = by_id[video_id]
 
-                video["video_details"] = {
-                    "snippet": item.get("snippet", {}),
-                    "content_details": item.get("contentDetails", {}),
-                    "statistics": item.get("statistics", {}),
-                    "status": item.get("status", {}),
-                }
+                # Provenance (NIK_YOUTUBE_SNAPSHOT_SCHEMA.md §8): store
+                # the untouched videos().list() item rather than a
+                # hand-picked subset, so kind/etag/id travel with it too.
+                # Strictly more complete than the previous reshaped dict;
+                # nothing that read the old four keys is removed.
+                video["video_details"] = item
 
     return videos
 
@@ -142,11 +143,26 @@ def main():
     snapshot = {
         "schema_version": "1.0",
         "snapshot_type": "youtube_video_inventory",
+        "snapshot_id": str(uuid.uuid4()),
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),
+        "source": "youtube_data_api",
+        "api_version": "v3",
 
         "channel_id": channel_id,
+
+        # Provenance (NIK_YOUTUBE_SNAPSHOT_SCHEMA.md §7). Reaching this
+        # point means fetch_video_inventory()'s pagination loop actually
+        # ran to completion — there is currently no partial-failure path
+        # that continues past a failed page, so True is accurate for any
+        # snapshot that gets this far, not an assumption.
+        "retrieval_metadata": {
+            "retrieved_resources": ["youtube#playlistItem", "youtube#video"],
+            "pagination_completed": True,
+            "errors": [],
+            "warnings": [],
+        },
 
         "uploads_playlist_id": uploads_playlist_id,
 

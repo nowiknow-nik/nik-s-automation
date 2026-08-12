@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import json
 import sys
+import uuid
 
 from googleapiclient.discovery import build
 
@@ -105,11 +106,27 @@ def main():
     snapshot = {
         "schema_version": "1.0",
         "snapshot_type": "youtube_channel_analytics",
+        "snapshot_id": str(uuid.uuid4()),
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),
+        "source": "youtube_analytics_api",
+        "api_version": "v2",
 
         "channel_id": channel_id,
+
+        # Provenance (NIK_YOUTUBE_SNAPSHOT_SCHEMA.md §7). A single
+        # reports().query() call, no pagination concept, so
+        # pagination_completed is None rather than True/False.
+        # No "evidence.raw_response" block is added below — the
+        # existing "analytics" field already holds the complete,
+        # untouched API response and would otherwise be duplicated.
+        "retrieval_metadata": {
+            "retrieved_resources": ["youtubeAnalytics#resultTable"],
+            "pagination_completed": None,
+            "errors": [],
+            "warnings": [],
+        },
 
         "reporting_period": {
             "start_date": start_date,

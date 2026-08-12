@@ -26,6 +26,8 @@ This is a data contract, not an analytics interpretation.
 
 \- snapshot\_id
 
+\- snapshot\_type
+
 \- generated\_at\_utc
 
 \- source
@@ -193,3 +195,15 @@ Every snapshot must preserve:
 \- resource ID
 
 \- raw API response where appropriate
+
+
+
+\---
+
+
+
+\## Implementation Note \(added 2026-08-12, provenance pass\)
+
+
+
+Field names as actually implemented: \`source\` is \`"youtube\_data\_api"\` or \`"youtube\_analytics\_api"\`; \`api\_version\` is \`"v3"\` or \`"v2"\`. §7 Retrieval Metadata is nested under a \`retrieval\_metadata\` key. §8's raw response lives under \`evidence.raw\_response\` for the channel snapshot; the analytics snapshot's existing \`analytics\` field already is the full raw response, so it is not duplicated under a second key. \`pagination\_completed\` is \`null\` for a single-call, non-paginated retrieval \(channel, analytics\) rather than \`true\`, so it can't be misread as "pagination was attempted and finished." \`errors\` and \`warnings\` are present per this schema but will be empty under the current architecture — a failed API call currently raises an exception and prevents a snapshot from being written at all, rather than producing a partial snapshot with a recorded error. Populating them meaningfully is future work, not done in this pass.

@@ -1,5 +1,6 @@
 import json
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,7 +50,26 @@ def build_snapshot(channel):
     return {
         "schema_version": "1.0",
         "snapshot_type": "youtube_channel",
+        "snapshot_id": str(uuid.uuid4()),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source": "youtube_data_api",
+        "api_version": "v3",
+
+        "channel_id": channel.get("id"),
+
+        # Provenance (NIK_YOUTUBE_SNAPSHOT_SCHEMA.md §7). A single,
+        # non-paginated lookup: pagination_completed is None (not
+        # applicable) rather than True, so it can't be misread as
+        # "pagination was attempted and finished." errors/warnings stay
+        # empty under the current architecture, since a failed API call
+        # raises and prevents a snapshot from being written at all — see
+        # the schema doc's Implementation Note.
+        "retrieval_metadata": {
+            "retrieved_resources": ["youtube#channel"],
+            "pagination_completed": None,
+            "errors": [],
+            "warnings": [],
+        },
 
         "channel": {
             "channel_id": channel.get("id"),
@@ -82,6 +102,15 @@ def build_snapshot(channel):
             ),
 
             "branding": branding,
+        },
+
+        # Provenance (NIK_YOUTUBE_SNAPSHOT_SCHEMA.md §8). The reshaped
+        # "channel" block above already existed and is left exactly as
+        # it was — this preserves the untouched API resource alongside
+        # it, so fields it doesn't carry forward (etag, full thumbnail
+        # set, localized, other relatedPlaylists) aren't silently lost.
+        "evidence": {
+            "raw_response": channel,
         },
     }
 
