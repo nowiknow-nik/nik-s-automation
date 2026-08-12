@@ -65,3 +65,6 @@ Thumbs.db
 # ------------------------------------------------------------
 
 !.gitignore
+
+# NIK YouTube local data
+integrations/youtube/data/
