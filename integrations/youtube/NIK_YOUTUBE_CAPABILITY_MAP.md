@@ -860,6 +860,22 @@ Do not connect Claude/MCP directly to raw credentials.
 
 \---
 
+\## 14.1 Sequencing Note \(added 2026-08-12\)
+
+Founder-approved deviation: items 7-8 above \(Quota governance, Provenance model\) are being addressed ahead of items 1-6.
+
+Status as of this note:
+
+Item 8 \(Provenance model\) has an implementation pass complete against the existing NIK\_YOUTUBE\_SNAPSHOT\_SCHEMA.md contract \(tested, not yet committed\).
+
+Item 7 \(Quota governance\) has been inspected only — no contract or implementation yet — and remains pending separate approval.
+
+Reason: items 7-8 close gaps against an already-approved contract and are foundational for the evidence/HITL layer planned after them. Items 1-6 are refactors of already-working scripts and were not judged urgent enough to block on.
+
+This note records the deviation for the historical record. It does not change the priority order stated above for any work beyond what has been separately approved.
+
+\---
+
 \# 15. Governance Principle
 
 The existence of an API capability does not create a requirement to implement it.
