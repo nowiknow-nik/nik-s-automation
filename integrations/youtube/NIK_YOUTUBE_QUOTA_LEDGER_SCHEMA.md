@@ -118,6 +118,10 @@ For a known-cost, shared-pool operation \(`channels.list`, `playlists.list`, `pl
 
 \- `remaining_run_ceiling_before_call` — integer, units remaining under Contract §5.1 before this call.
 
+\- `remaining_pagination_ceiling_before_call` — integer or `null`, present once a producer has been updated to this field \(as of Stage B2.2e: `playlistItems.list`/`videos.list` in `video_inventory.py`\). An integer gives the number of pages or batches remaining in this invocation before Contract §7's pagination/batch ceiling would be reached. `null` marks a known-cost operation this ceiling does not apply to \(`channels.list`, `playlists.list`\), once that operation's own producer is updated to this field.
+
+\- Existing producers of `channels.list`/`playlists.list` pre-call events not yet updated to this field \(as of Stage B2.2e: `channel_snapshot.py`, `youtube_discovery.py`\) may omit the field entirely instead of emitting `null` — omission means "not yet updated to this field," not "zero remaining." See §11.
+
 \- `remaining_daily_budget_before_call` — integer, units remaining under Contract §5.2 before this call.
 
 \- `cooldown_ok` — boolean, whether Contract §5.3's cooldown is satisfied.
@@ -273,3 +277,13 @@ Two implementation decisions went beyond this document's literal text and were f
 Stage B2.1 \(2026-08-13\) revised this schema from v1.1 to v1.2: §6.2's `pre_call_check` shape now records every applicable ceiling's remaining value plus a `binding` field instead of one undifferentiated `remaining_budget_before_call`; §10.1 excludes `search.list` from the shared-pool known-cost sum; §10.6 adds pre-call write failure handling. Stage B1's committed `write_pre_call_event()` still implements v1.1's single-field shape, and `compute_known_cost_usage()` still includes `search.list` in its sum — both now need a follow-up code change to match this schema. That code change is separate, future work requiring its own explicit approval, not carried out as part of this reconciliation pass.
 
 Stage B2 \(integration into the four API-calling scripts, and actual enforcement of the Sec 5 policy limits\) is separate, future work requiring its own explicit approval, per the Quota Governance Contract §12.
+
+Stage B2.2e \(2026-08-13\) added `remaining_pagination_ceiling_before_call` to the known-cost `pre_call_check` shape in §6.2 \(the `channels.list` / `playlists.list` / `playlistItems.list` / `videos.list` shape only — the `search.list` and Analytics shapes in §6.2 are unaffected\), so that a governed script's pagination and batch loops \(currently only `video_inventory.py`\) can report remaining page/batch headroom for auditability. The existing `binding: "pagination_ceiling"` enum value \(§6.2\) is unchanged; no separate `"batch_ceiling"` value was added, since a page denial and a batch denial are both represented the same way. A few points from this change are worth recording explicitly:
+
+\- This is an additive, backward-compatible field addition, not a structural revision like the v1.1-to-v1.2 change described above, so the \*\*Version:\*\* 1.2 header is intentionally left unchanged.
+
+\- `src/quota_ledger.py`'s `LEDGER_SCHEMA_VERSION` constant is likewise unchanged \(out of scope for this stage\), so every ledger entry — including ones that populate this new field — continues self-reporting `ledger_schema_version: "1.2"`.
+
+\- Quota Governance Contract §6's own check-order text still does not mention where the §7 pagination/batch ceiling fits among the per-run ceiling, daily budget, and cooldown checks it does list. Stage B2.2e resolved that ordering in code as run ceiling, then pagination/batch ceiling, then daily budget, then cooldown, but did not edit the Contract's own text to reflect it — only this Schema document was authorized for modification at this stage.
+
+\- `channels.list`/`playlists.list` pre-call events written by `channel_snapshot.py` and `youtube_discovery.py` are unaffected by this stage and omit `remaining_pagination_ceiling_before_call` entirely rather than emitting it as `null` — updating those two producers to this field was explicitly out of scope for B2.2e's own stage boundary. See §6.2 for the omission-vs-`null` distinction this implies.
