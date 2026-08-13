@@ -9,6 +9,7 @@ from googleapiclient.discovery import build
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auth import get_credentials
+import quota_ledger
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -54,7 +55,105 @@ def get_date_range():
     )
 
 
-def fetch_channel_analytics(youtube_analytics, channel_id, start_date, end_date):
+# NIK_YOUTUBE_QUOTA_GOVERNANCE_CONTRACT.md Sec 5.4 policy values.
+# Analytics has no unit cost (Sec 4.3) -- these are call-frequency
+# limits, not the 50-unit/1,000-unit policy in Sec 5.1/5.2, and must
+# never be checked against RUN_CEILING_UNITS/DAILY_BUDGET_UNITS or
+# compute_known_cost_usage (Sec 6). Local to this file for the same
+# reason channel_snapshot.py's Sec 5.1-5.3 constants are local to it.
+MAX_CALLS_PER_INVOCATION = 1
+COOLDOWN = timedelta(minutes=5)
+MAX_INVOCATIONS_PER_24H = 12
+ANALYTICS_POLICY_NAME = "analytics_call_frequency_v1"
+
+
+class QuotaDeniedError(Exception):
+    """
+    A pre-call check denied this API call (Contract Sec 6). Per Sec
+    7.3 / Sec 10 this must propagate uncaught so the script exits
+    without producing a snapshot -- it must never be caught and
+    degraded to a partial result.
+    """
+
+
+def _evaluate_analytics_pre_call_check(
+    calls_made_this_invocation,
+    script="analytics_snapshot.py",
+    path=quota_ledger.LEDGER_PATH,
+    now=None,
+):
+    # Builds and evaluates the v1.2 pre_call_check dict (Ledger Schema
+    # Sec 6.2) for the dynamic-cost Analytics operation. Checks the
+    # per-invocation limit, then the cooldown, then the rolling-24h
+    # invocation ceiling -- Sec 5.4's own listed order -- and reports
+    # whichever binds first if more than one would deny.
+    #
+    # calls_made_this_invocation is process-local by design (Sec 5.4's
+    # first component; Ledger Schema Sec 6.2's own note that this
+    # component "has no dedicated remaining-count field" and "is
+    # enforced as process-local state"). Never read from the ledger's
+    # persisted history -- the same process-local pattern already used
+    # for channel_snapshot.py's run_ceiling_used (Contract Sec 5.1).
+    now = now or quota_ledger.utc_now()
+    entries = quota_ledger.read_entries(path=path)
+
+    invocations_used = quota_ledger.compute_analytics_call_count(
+        entries, now - timedelta(hours=24), now, script=script
+    )
+    invocations_remaining = MAX_INVOCATIONS_PER_24H - invocations_used
+
+    last_invocation = quota_ledger.most_recent_invocation_timestamp(entries, script)
+    cooldown_ok = last_invocation is None or (now - last_invocation) >= COOLDOWN
+
+    if calls_made_this_invocation >= MAX_CALLS_PER_INVOCATION:
+        binding, decision = "per_invocation_limit", quota_ledger.DENIED
+    elif not cooldown_ok:
+        binding, decision = "cooldown", quota_ledger.DENIED
+    elif invocations_remaining <= 0:
+        binding, decision = "invocation_ceiling", quota_ledger.DENIED
+    else:
+        binding, decision = None, quota_ledger.ALLOWED
+
+    return {
+        "policy": ANALYTICS_POLICY_NAME,
+        "invocations_remaining_in_window": invocations_remaining,
+        "cooldown_ok": cooldown_ok,
+        "binding": binding,
+        "decision": decision,
+    }
+
+
+def fetch_channel_analytics(
+    youtube_analytics,
+    channel_id,
+    start_date,
+    end_date,
+    collection_id=None,
+    calls_made_this_invocation=0,
+    path=quota_ledger.LEDGER_PATH,
+):
+    pre_call_check = _evaluate_analytics_pre_call_check(
+        calls_made_this_invocation, path=path
+    )
+
+    call_id = quota_ledger.write_pre_call_event(
+        script="analytics_snapshot.py",
+        operation="reports.query",
+        collection_id=collection_id,
+        cost_model=quota_ledger.DYNAMIC_COST_MODEL,
+        estimated_cost_units=None,
+        pre_call_check=pre_call_check,
+        path=path,
+    )
+
+    if pre_call_check["decision"] == quota_ledger.DENIED:
+        # Contract Sec 7.3 / Sec 10: propagate uncaught, no snapshot
+        # produced -- this must not be caught and degraded.
+        raise QuotaDeniedError(
+            "reports.query denied by quota governance "
+            f"(binding={pre_call_check['binding']!r})"
+        )
+
     metrics = ",".join(
         [
             "views",
@@ -68,15 +167,33 @@ def fetch_channel_analytics(youtube_analytics, channel_id, start_date, end_date)
         ]
     )
 
-    response = (
-        youtube_analytics.reports()
-        .query(
-            ids=f"channel=={channel_id}",
-            startDate=start_date,
-            endDate=end_date,
-            metrics=metrics,
+    try:
+        response = (
+            youtube_analytics.reports()
+            .query(
+                ids=f"channel=={channel_id}",
+                startDate=start_date,
+                endDate=end_date,
+                metrics=metrics,
+            )
+            .execute()
         )
-        .execute()
+    except Exception as exc:
+        # Ledger Schema Sec 6.3: a post-call event is written on
+        # failure too, then the original exception still propagates.
+        quota_ledger.write_post_call_event(
+            call_id=call_id,
+            outcome="failure",
+            error=str(exc),
+            path=path,
+        )
+        raise
+
+    quota_ledger.write_post_call_event(
+        call_id=call_id,
+        outcome="success",
+        error=None,
+        path=path,
     )
 
     return response
@@ -84,6 +201,8 @@ def fetch_channel_analytics(youtube_analytics, channel_id, start_date, end_date)
 
 def main():
     print("===== NIK YOUTUBE ANALYTICS SNAPSHOT =====")
+
+    collection_id = os.environ.get("NIK_COLLECTION_ID")
 
     credentials = get_credentials()
 
@@ -102,6 +221,7 @@ def main():
         channel_id,
         start_date,
         end_date,
+        collection_id=collection_id,
     )
 
     snapshot = {
@@ -116,7 +236,7 @@ def main():
 
         # Provenance (collection linkage pass). None when this builder
         # runs standalone, outside collector.py.
-        "collection_id": os.environ.get("NIK_COLLECTION_ID"),
+        "collection_id": collection_id,
 
         "channel_id": channel_id,
 
