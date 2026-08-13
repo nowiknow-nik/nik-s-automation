@@ -205,10 +205,11 @@ def test_orphaned_allowed_call_still_counts_toward_usage(tmp_path):
     over Option B to close.
     """
     path = _ledger_path(tmp_path)
-    _write_known(path, decision="allowed", estimated_cost_units=1)
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_known(path, decision="allowed", estimated_cost_units=1)
     # Deliberately no write_post_call_event call here.
 
-    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
     usage = known_cost_usage_last_24h(path=path, now=now)
 
     assert usage == 1
@@ -217,10 +218,11 @@ def test_orphaned_allowed_call_still_counts_toward_usage(tmp_path):
 def test_orphaned_allowed_analytics_call_still_counts(tmp_path):
     """Same property as above, for the dynamic-cost / Analytics frequency count."""
     path = _ledger_path(tmp_path)
-    _write_dynamic(path, decision="allowed")
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_dynamic(path, decision="allowed")
     # No post-call event.
 
-    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
     assert analytics_call_count_last_24h(path=path, now=now) == 1
 
 
@@ -231,10 +233,11 @@ def test_completed_call_counts_the_same_as_an_orphaned_one(tmp_path):
     pre-call event, never on whether a post-call event exists.
     """
     path = _ledger_path(tmp_path)
-    call_id = _write_known(path, decision="allowed", estimated_cost_units=1)
-    write_post_call_event(call_id=call_id, outcome="success", error=None, path=path)
-
     now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        call_id = _write_known(path, decision="allowed", estimated_cost_units=1)
+        write_post_call_event(call_id=call_id, outcome="success", error=None, path=path)
+
     assert known_cost_usage_last_24h(path=path, now=now) == 1
 
 
@@ -264,10 +267,11 @@ def test_denied_pre_call_excluded_from_analytics_call_count(tmp_path):
 
 def test_known_cost_summation_excludes_dynamic_cost_entries(tmp_path):
     path = _ledger_path(tmp_path)
-    _write_dynamic(path, decision="allowed")
-    _write_known(path, decision="allowed", estimated_cost_units=1)
-
     now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_dynamic(path, decision="allowed")
+        _write_known(path, decision="allowed", estimated_cost_units=1)
+
     # Only the known-cost entry should contribute -- the dynamic entry
     # has no unit value and must never be summed in.
     assert known_cost_usage_last_24h(path=path, now=now) == 1
@@ -275,19 +279,21 @@ def test_known_cost_summation_excludes_dynamic_cost_entries(tmp_path):
 
 def test_analytics_call_count_excludes_known_cost_entries(tmp_path):
     path = _ledger_path(tmp_path)
-    _write_known(path, decision="allowed", estimated_cost_units=1, script="analytics_snapshot.py", operation="channels.list")
-    _write_dynamic(path, decision="allowed")
-
     now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_known(path, decision="allowed", estimated_cost_units=1, script="analytics_snapshot.py", operation="channels.list")
+        _write_dynamic(path, decision="allowed")
+
     assert analytics_call_count_last_24h(path=path, now=now, script="analytics_snapshot.py") == 1
 
 
 def test_analytics_call_count_scoped_to_requested_script(tmp_path):
     path = _ledger_path(tmp_path)
-    _write_dynamic(path, decision="allowed", script="analytics_snapshot.py")
-    _write_known(path, decision="allowed", estimated_cost_units=1, script="channel_snapshot.py")
-
     now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_dynamic(path, decision="allowed", script="analytics_snapshot.py")
+        _write_known(path, decision="allowed", estimated_cost_units=1, script="channel_snapshot.py")
+
     assert analytics_call_count_last_24h(path=path, now=now, script="analytics_snapshot.py") == 1
 
 
@@ -300,10 +306,11 @@ def test_analytics_call_count_scoped_to_requested_script(tmp_path):
 
 def test_known_cost_summation_excludes_search_list_entries(tmp_path):
     path = _ledger_path(tmp_path)
-    _write_search(path, decision="allowed", estimated_cost_units=1)
-    _write_known(path, decision="allowed", estimated_cost_units=1)
-
     now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_search(path, decision="allowed", estimated_cost_units=1)
+        _write_known(path, decision="allowed", estimated_cost_units=1)
+
     # Only the ordinary known-cost (channels.list) entry should
     # contribute -- search.list draws from its own separate allocation
     # and must never be summed into the shared pool.
@@ -312,19 +319,21 @@ def test_known_cost_summation_excludes_search_list_entries(tmp_path):
 
 def test_search_usage_excludes_ordinary_known_cost_entries(tmp_path):
     path = _ledger_path(tmp_path)
-    _write_known(path, decision="allowed", estimated_cost_units=1)
-    _write_search(path, decision="allowed", estimated_cost_units=1)
-
     now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_known(path, decision="allowed", estimated_cost_units=1)
+        _write_search(path, decision="allowed", estimated_cost_units=1)
+
     assert search_usage_last_24h(path=path, now=now) == 1
 
 
 def test_search_usage_excludes_dynamic_cost_entries(tmp_path):
     path = _ledger_path(tmp_path)
-    _write_dynamic(path, decision="allowed")
-    _write_search(path, decision="allowed", estimated_cost_units=1)
-
     now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_dynamic(path, decision="allowed")
+        _write_search(path, decision="allowed", estimated_cost_units=1)
+
     assert search_usage_last_24h(path=path, now=now) == 1
 
 
@@ -349,10 +358,11 @@ def test_orphaned_allowed_search_call_still_counts_toward_usage(tmp_path):
     loop.
     """
     path = _ledger_path(tmp_path)
-    _write_search(path, decision="allowed", estimated_cost_units=1)
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=now):
+        _write_search(path, decision="allowed", estimated_cost_units=1)
     # Deliberately no write_post_call_event call here.
 
-    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
     assert search_usage_last_24h(path=path, now=now) == 1
 
 
