@@ -2,7 +2,7 @@
 
 \*\*Version:\*\* 1.4
 
-\*\*Status:\*\* Policy Approved for Implementation Planning; Ledger Module Implemented \(Stage B1\); Contract/Schema Reconciliation Complete \(Stage B2.1\) — Enforcement Integration Not Yet Authorized \(Google-published facts verified in §4; NIK policy values in §5, including the Analytics policy in §5.4, are approved as policy; the quota ledger module itself is implemented per §9.2 but not yet integrated into any API-calling script, and no API-calling behavior has changed; §6, §7.3, §8, §9.2, §9.3, and §10 were revised 2026-08-13 to correct how `search().list()` is accounted for and to codify pagination-ceiling and pre-call-write failure behavior ahead of Stage B2 — see §11 and §12\)
+\*\*Status:\*\* Policy Approved for Implementation Planning; Ledger Module Implemented \(Stage B1\); Contract/Schema Reconciliation Complete \(Stage B2.1\) — Enforcement Integration Not Yet Authorized \(Google-published facts verified in §4; NIK policy values in §5, including the Analytics policy in §5.4, are approved as policy; the quota ledger module itself is implemented per §9.2 but not yet integrated into any API-calling script, and no API-calling behavior has changed; §6, §7.3, §8, §9.2, §9.3, and §10 were revised 2026-08-13 to correct how `search().list()` is accounted for and to codify pagination-ceiling and pre-call-write failure behavior ahead of Stage B2; §5.1 and §6 were additionally clarified 2026-08-13 to record that the §5.1 per-run ceiling is scoped per individual script invocation \(not aggregated across a collection\) and that `search.list` also observes the general §5.3 cooldown — see §11 and §12\)
 
 \*\*System:\*\* NIK YouTube Integration
 
@@ -152,6 +152,8 @@ The values in 5.1 through 5.4 were approved for implementation planning on 2026-
 
 Reasoning: a full `collector.py` run today makes on the order of 3–6 Data API calls total \(1 `channels.list`, 1–2 `playlistItems.list` pages, 1 `videos.list` batch — the channel currently has 0 published videos per Capability Map §11\) plus 1 Analytics `reports().query()` call. 50 units gives roughly an order of magnitude of headroom for legitimate channel growth while still being small enough to catch a runaway loop long before it could approach the 10,000-unit daily pool.
 
+Scope: this ceiling applies independently to each script invocation, not in aggregate across a collection. `channel_snapshot.py`, `video_inventory.py`, and `analytics_snapshot.py` — the three subprocesses one `collector.py` run orchestrates — each start their own count at zero on process start and are checked only against their own usage. A full `collector.py` collection therefore has no single ceiling shared across its three subprocesses; each is bounded independently.
+
 Status: Approved for implementation planning, 2026-08-12. Not yet implemented in code.
 
 \### 5.2 Daily NIK Safety Budget — 1,000 units per rolling 24-hour period
@@ -203,6 +205,8 @@ For `search.list` \(§4.1\), which draws from Google's own separate rolling allo
 \(a\) the per-run ceiling \(§5.1\)
 
 \(b\) its own controlled-search policy \(§8\)
+
+\(c\) any applicable cooldown requirement \(§5.3\)
 
 `search.list` must never be checked against the daily budget in §5.2 — that budget is sized against the shared pool `search.list` does not draw from, and checking it there would be exactly the silent conflation §2 prohibits.
 
@@ -286,7 +290,7 @@ Summary \(full detail in the schema document, now at v1.2\):
 
 \- Known-cost pre-call events \(§4.1 operations\) carry a numeric `estimated_cost_units`; dynamic-cost pre-call events \(§4.3\) carry `estimated_cost_units: null` — the two must never be summed together. `search.list` events are known-cost but are excluded from the shared-pool sum entirely, per §6 — see the schema document's §10.1.
 
-\- Each pre-call event's `pre_call_check` records every ceiling that actually applies to its operation \(per-run, daily, cooldown, or the search/Analytics-specific equivalents\) as a remaining value, plus a `binding` field naming which one, if any, was the reason for a denial — never a single undifferentiated remaining-budget number.
+\- Each pre-call event's `pre_call_check` records every ceiling that actually applies to its operation \(per-run, daily, cooldown, pagination/batch, or the search/Analytics-specific equivalents\) as a remaining value, plus a `binding` field naming which one, if any, was the reason for a denial — never a single undifferentiated remaining-budget number.
 
 \- `actual_cost_units`, on a post-call event, is `null` until it is independently verified whether Google's API responses expose actually-consumed quota in a client-visible way.
 

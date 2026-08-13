@@ -122,7 +122,7 @@ For a known-cost, shared-pool operation \(`channels.list`, `playlists.list`, `pl
 
 \- `cooldown_ok` — boolean, whether Contract §5.3's cooldown is satisfied.
 
-\- `binding` — string or `null`. Names the one check that caused a denial: `"run_ceiling"`, `"daily_budget"`, or `"cooldown"`. `null` when `decision` is `"allowed"`.
+\- `binding` — string or `null`. Names the one check that caused a denial: `"run_ceiling"`, `"daily_budget"`, `"cooldown"`, or `"pagination_ceiling"`. `null` when `decision` is `"allowed"`.
 
 \- `decision` — `"allowed"` or `"denied"`.
 
