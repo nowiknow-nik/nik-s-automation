@@ -15,6 +15,8 @@ from quota_ledger import (
     read_entries,
     compute_known_cost_usage,
     known_cost_usage_last_24h,
+    compute_search_usage,
+    search_usage_last_24h,
     compute_analytics_call_count,
     analytics_call_count_last_24h,
     most_recent_invocation_timestamp,
@@ -32,7 +34,38 @@ def _write_known(path, decision="allowed", estimated_cost_units=1, script="chann
         collection_id=collection_id,
         cost_model="known",
         estimated_cost_units=estimated_cost_units,
-        pre_call_check={"remaining_budget_before_call": 999, "decision": decision},
+        pre_call_check={
+            "remaining_run_ceiling_before_call": 49,
+            "remaining_daily_budget_before_call": 999,
+            "cooldown_ok": True,
+            "binding": None if decision == "allowed" else "daily_budget",
+            "decision": decision,
+        },
+        path=path,
+    )
+
+
+def _write_search(path, decision="allowed", estimated_cost_units=1, script="youtube_discovery.py", collection_id=None):
+    """
+    search.list is cost_model == "known" (Contract Sec 4.1) but not
+    shared-pool -- its pre_call_check shape has no
+    remaining_daily_budget_before_call field (Schema Sec 6.2), and its
+    own usage is counted separately (compute_search_usage(), not
+    compute_known_cost_usage()).
+    """
+    return write_pre_call_event(
+        script=script,
+        operation="search.list",
+        collection_id=collection_id,
+        cost_model="known",
+        estimated_cost_units=estimated_cost_units,
+        pre_call_check={
+            "remaining_run_ceiling_before_call": 49,
+            "remaining_search_allocation_before_call": 99,
+            "cooldown_ok": True,
+            "binding": None if decision == "allowed" else "search_allocation",
+            "decision": decision,
+        },
         path=path,
     )
 
@@ -44,7 +77,13 @@ def _write_dynamic(path, decision="allowed", script="analytics_snapshot.py", ope
         collection_id=collection_id,
         cost_model="dynamic",
         estimated_cost_units=None,
-        pre_call_check={"policy": "analytics_call_frequency_v1", "decision": decision},
+        pre_call_check={
+            "policy": "analytics_call_frequency_v1",
+            "invocations_remaining_in_window": 11,
+            "cooldown_ok": True,
+            "binding": None if decision == "allowed" else "invocation_ceiling",
+            "decision": decision,
+        },
         path=path,
     )
 
@@ -61,7 +100,7 @@ def test_write_pre_call_event_returns_call_id_and_persists_it(tmp_path):
     assert len(entries) == 1
     assert entries[0]["call_id"] == call_id
     assert entries[0]["event_type"] == "pre_call_check"
-    assert entries[0]["ledger_schema_version"] == "1.1"
+    assert entries[0]["ledger_schema_version"] == "1.2"
 
 
 def test_write_creates_parent_directory(tmp_path):
@@ -253,6 +292,116 @@ def test_analytics_call_count_scoped_to_requested_script(tmp_path):
 
 
 # ---------------------------------------------------------------------
+# search.list usage -- separate from both shared-pool known-cost usage
+# and Analytics call count (Stage B2.1's accounting correction,
+# Stage B2.2a's code update -- Contract Sec 4.1/Sec 6/Sec 8, Schema
+# Sec 10.1).
+# ---------------------------------------------------------------------
+
+def test_known_cost_summation_excludes_search_list_entries(tmp_path):
+    path = _ledger_path(tmp_path)
+    _write_search(path, decision="allowed", estimated_cost_units=1)
+    _write_known(path, decision="allowed", estimated_cost_units=1)
+
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    # Only the ordinary known-cost (channels.list) entry should
+    # contribute -- search.list draws from its own separate allocation
+    # and must never be summed into the shared pool.
+    assert known_cost_usage_last_24h(path=path, now=now) == 1
+
+
+def test_search_usage_excludes_ordinary_known_cost_entries(tmp_path):
+    path = _ledger_path(tmp_path)
+    _write_known(path, decision="allowed", estimated_cost_units=1)
+    _write_search(path, decision="allowed", estimated_cost_units=1)
+
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    assert search_usage_last_24h(path=path, now=now) == 1
+
+
+def test_search_usage_excludes_dynamic_cost_entries(tmp_path):
+    path = _ledger_path(tmp_path)
+    _write_dynamic(path, decision="allowed")
+    _write_search(path, decision="allowed", estimated_cost_units=1)
+
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    assert search_usage_last_24h(path=path, now=now) == 1
+
+
+def test_denied_search_pre_call_excluded_from_search_usage(tmp_path):
+    path = _ledger_path(tmp_path)
+    _write_search(path, decision="denied")
+
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    assert search_usage_last_24h(path=path, now=now) == 0
+
+
+def test_orphaned_allowed_search_call_still_counts_toward_usage(tmp_path):
+    """
+    Same crash-safety property as the shared-pool and Analytics usage
+    functions (see the orphaned-call tests above): an allowed
+    search.list pre-call event with no post-call event -- because the
+    process made the real API call and crashed before recording the
+    result -- must still count toward search.list's own rolling
+    allocation. If this failed, an interrupted process could make a
+    real search.list call disappear from the one governance mechanism
+    (Sec 8) that stands between this operation and an unbounded search
+    loop.
+    """
+    path = _ledger_path(tmp_path)
+    _write_search(path, decision="allowed", estimated_cost_units=1)
+    # Deliberately no write_post_call_event call here.
+
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    assert search_usage_last_24h(path=path, now=now) == 1
+
+
+def test_search_usage_rolling_window_excludes_entries_older_than_24_hours(tmp_path):
+    path = _ledger_path(tmp_path)
+    old_time = datetime(2026, 8, 10, 0, 0, 0, tzinfo=timezone.utc)
+    with patch("quota_ledger.utc_now", return_value=old_time):
+        _write_search(path, decision="allowed", estimated_cost_units=1)
+
+    now = old_time + timedelta(hours=25)
+    assert search_usage_last_24h(path=path, now=now) == 0
+
+
+def test_compute_search_usage_pure_function_on_in_memory_entries():
+    """
+    Exercises compute_search_usage directly, without file I/O -- same
+    rationale as the equivalent known-cost and Analytics tests above:
+    easiest to reason about, and to unit test precisely, as a pure
+    function over an explicit list of entries.
+    """
+    window_start = datetime(2026, 8, 12, 12, 0, 0, tzinfo=timezone.utc)
+    window_end = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    in_window = datetime(2026, 8, 13, 0, 0, 0, tzinfo=timezone.utc)
+
+    entries = [
+        {
+            "event_type": "pre_call_check", "cost_model": "known",
+            "operation": "search.list", "estimated_cost_units": 1,
+            "timestamp_utc": in_window.isoformat(),
+            "pre_call_check": {"decision": "allowed"},
+        },
+        {
+            "event_type": "pre_call_check", "cost_model": "known",
+            "operation": "search.list", "estimated_cost_units": 1,
+            "timestamp_utc": in_window.isoformat(),
+            "pre_call_check": {"decision": "denied"},
+        },
+        {
+            "event_type": "pre_call_check", "cost_model": "known",
+            "operation": "channels.list", "estimated_cost_units": 1,
+            "timestamp_utc": in_window.isoformat(),
+            "pre_call_check": {"decision": "allowed"},
+        },
+    ]
+
+    assert compute_search_usage(entries, window_start, window_end) == 1
+
+
+# ---------------------------------------------------------------------
 # Rolling 24-hour window
 # ---------------------------------------------------------------------
 
@@ -376,7 +525,7 @@ def _write_raw_line(path, obj):
 
 def _sample_entry(**overrides):
     entry = {
-        "ledger_schema_version": "1.1",
+        "ledger_schema_version": "1.2",
         "entry_id": "e-1",
         "call_id": "c-1",
         "event_type": "pre_call_check",
@@ -386,7 +535,13 @@ def _sample_entry(**overrides):
         "collection_id": None,
         "cost_model": "known",
         "estimated_cost_units": 1,
-        "pre_call_check": {"remaining_budget_before_call": 999, "decision": "allowed"},
+        "pre_call_check": {
+            "remaining_run_ceiling_before_call": 49,
+            "remaining_daily_budget_before_call": 999,
+            "cooldown_ok": True,
+            "binding": None,
+            "decision": "allowed",
+        },
     }
     entry.update(overrides)
     return entry

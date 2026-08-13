@@ -1,21 +1,27 @@
 """
-NIK YouTube quota ledger (Stage B1).
+NIK YouTube quota ledger (Stage B1; updated Stage B2.2a for schema v1.2).
 
 Implements the append-only, two-event-per-call design specified in
-NIK_YOUTUBE_QUOTA_LEDGER_SCHEMA.md v1.1 and governed by
+NIK_YOUTUBE_QUOTA_LEDGER_SCHEMA.md v1.2 and governed by
 NIK_YOUTUBE_QUOTA_GOVERNANCE_CONTRACT.md.
 
 Scope: this module is the ledger only. Nothing here is called by
 channel_snapshot.py, video_inventory.py, analytics_snapshot.py,
 youtube_discovery.py, or collector.py yet, and no API-calling behavior
-is changed by this file's existence. Integration is Stage B2, separate,
-future work requiring its own approval.
+is changed by this file's existence. Integration begins at Stage B2.2b
+and is separate, future work, each call site requiring its own
+approval.
 
 This module does not decide whether to allow or deny a call. It writes
-events, and it answers "how much has been used in a window" and "when
-was this script last invoked." A future Stage B2 caller compares those
-answers against the limits in NIK_YOUTUBE_QUOTA_GOVERNANCE_CONTRACT.md
-Sec 5 and decides allow/deny -- this module supplies facts, not policy.
+events, and it answers "how much has been used in a window," "when
+was this script last invoked," and, as of Stage B2.2a, "how much of
+search.list's own separate rolling allocation has been used" (Quota
+Governance Contract Sec 8) -- tracked apart from the shared-pool
+known-cost sum below, which now excludes search.list entirely
+(NIK_YOUTUBE_QUOTA_LEDGER_SCHEMA.md Sec 10.1). A future Stage B2
+caller compares those answers against the limits in
+NIK_YOUTUBE_QUOTA_GOVERNANCE_CONTRACT.md Sec 5 and Sec 8 and decides
+allow/deny -- this module supplies facts, not policy.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-LEDGER_SCHEMA_VERSION = "1.1"
+LEDGER_SCHEMA_VERSION = "1.2"
 
 ROOT = Path(__file__).resolve().parent.parent
 LEDGER_PATH = ROOT / "logs" / "quota_ledger.jsonl"
@@ -85,15 +91,22 @@ def write_pre_call_event(
 ) -> str:
     """
     Writes a pre_call_check event per NIK_YOUTUBE_QUOTA_LEDGER_SCHEMA.md
-    Sec 6.2, before the API call is made. Returns the new call_id.
+    Sec 6.2 (v1.2), before the API call is made. Returns the new call_id.
 
-    pre_call_check must contain "decision" ("allowed" or "denied"),
-    plus either "remaining_budget_before_call" (cost_model == "known")
-    or "policy" (cost_model == "dynamic"), per the schema's two shapes.
-    This function validates cost_model and decision; it does not
-    further validate pre_call_check's shape beyond that, to avoid this
-    module being more prescriptive than Stage B2 enforcement design has
-    settled yet.
+    pre_call_check's exact shape depends on which policy governs the
+    operation (Schema Sec 6.2): a known-cost, shared-pool operation
+    carries remaining_run_ceiling_before_call,
+    remaining_daily_budget_before_call, cooldown_ok, binding, and
+    decision; search.list carries remaining_run_ceiling_before_call,
+    remaining_search_allocation_before_call, cooldown_ok, binding, and
+    decision (no daily-budget field); the dynamic-cost Analytics
+    operation carries policy, invocations_remaining_in_window,
+    cooldown_ok, binding, and decision. Every shape requires "decision"
+    ("allowed" or "denied"). This function validates only cost_model
+    and decision; it does not further validate pre_call_check's shape
+    beyond that, so this module does not need to change again as each
+    Stage B2 call site's enforcement is worked out -- the schema
+    document remains the single source of truth for the exact shape.
 
     Callers: for a denied call, this is the only event ever written for
     this call_id -- do not call write_post_call_event afterward
@@ -233,7 +246,7 @@ def compute_known_cost_usage(
     """
     Sum estimated_cost_units across pre_call_check events where
     cost_model == "known" and decision == "allowed", timestamped within
-    [window_start, window_end].
+    [window_start, window_end] -- excluding search.list (see below).
 
     Deliberately does not look for a matching post_call_result event --
     per NIK_YOUTUBE_QUOTA_LEDGER_SCHEMA.md Sec 10.1/10.2, an allowed
@@ -246,12 +259,22 @@ def compute_known_cost_usage(
 
     A "denied" pre-call event is excluded: a denied call consumed no
     real quota, because no API call was made.
+
+    search.list is excluded from this sum even though it is cost_model
+    == "known": it draws from Google's own separate, rolling allocation
+    rather than the shared pool this function totals (Quota Governance
+    Contract Sec 4.1, Sec 6; Ledger Schema Sec 10.1). Summing it in
+    here would be exactly the silent conflation the contract's Sec 2
+    core principle prohibits. Use compute_search_usage() for
+    search.list's own separate rolling-24h count.
     """
     total = 0
     for entry in entries:
         if entry.get("event_type") != PRE_CALL_EVENT:
             continue
         if entry.get("cost_model") != KNOWN_COST_MODEL:
+            continue
+        if entry.get("operation") == "search.list":
             continue
         if entry.get("pre_call_check", {}).get("decision") != ALLOWED:
             continue
@@ -272,6 +295,57 @@ def known_cost_usage_last_24h(
     now = now or utc_now()
     entries = read_entries(path)
     return compute_known_cost_usage(entries, now - timedelta(hours=24), now)
+
+
+def compute_search_usage(
+    entries: list[dict],
+    window_start: datetime,
+    window_end: datetime,
+) -> int:
+    """
+    Count pre_call_check events where operation == "search.list",
+    cost_model == "known", and decision == "allowed", timestamped
+    within [window_start, window_end].
+
+    This is search.list's own rolling-24h allocation count (Quota
+    Governance Contract Sec 8), tracked entirely separately from the
+    shared-pool known-cost sum computed by compute_known_cost_usage(),
+    which excludes search.list entirely (Ledger Schema Sec 10.1) --
+    summing the two together anywhere would be the exact silent
+    conflation Contract Sec 2 prohibits.
+
+    Same allowed-pre-call-only principle as compute_known_cost_usage()
+    and compute_analytics_call_count(): an orphaned allowed search.list
+    attempt (API call made, process crashed before the post-call event
+    was written) still counts toward the allocation ceiling, for the
+    same fail-closed reasoning (Schema Sec 10.1/10.2).
+
+    A "denied" pre-call event is excluded: a denied call consumed no
+    real allocation, because no API call was made.
+    """
+    count = 0
+    for entry in entries:
+        if entry.get("event_type") != PRE_CALL_EVENT:
+            continue
+        if entry.get("cost_model") != KNOWN_COST_MODEL:
+            continue
+        if entry.get("operation") != "search.list":
+            continue
+        if entry.get("pre_call_check", {}).get("decision") != ALLOWED:
+            continue
+        if not _in_window(entry, window_start, window_end):
+            continue
+        count += 1
+    return count
+
+
+def search_usage_last_24h(
+    path: Path = LEDGER_PATH, now: datetime | None = None
+) -> int:
+    """Convenience wrapper: reads the ledger and counts allowed search.list pre-call events in the trailing rolling 24 hours."""
+    now = now or utc_now()
+    entries = read_entries(path)
+    return compute_search_usage(entries, now - timedelta(hours=24), now)
 
 
 def compute_analytics_call_count(
