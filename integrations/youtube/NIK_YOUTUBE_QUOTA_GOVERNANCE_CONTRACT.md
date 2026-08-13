@@ -1,8 +1,8 @@
 \# NIK YouTube Quota Governance Contract
 
-\*\*Version:\*\* 1.3
+\*\*Version:\*\* 1.4
 
-\*\*Status:\*\* Policy Approved for Implementation Planning; Ledger Module Implemented \(Stage B1\) — Enforcement Integration Not Yet Authorized \(Google-published facts verified in §4; NIK policy values in §5, including the Analytics policy in §5.4, are approved as policy; the quota ledger module itself is implemented per §9.2 but not yet integrated into any API-calling script, and no API-calling behavior has changed — see §11 and §12\)
+\*\*Status:\*\* Policy Approved for Implementation Planning; Ledger Module Implemented \(Stage B1\); Contract/Schema Reconciliation Complete \(Stage B2.1\) — Enforcement Integration Not Yet Authorized \(Google-published facts verified in §4; NIK policy values in §5, including the Analytics policy in §5.4, are approved as policy; the quota ledger module itself is implemented per §9.2 but not yet integrated into any API-calling script, and no API-calling behavior has changed; §6, §7.3, §8, §9.2, §9.3, and §10 were revised 2026-08-13 to correct how `search().list()` is accounted for and to codify pagination-ceiling and pre-call-write failure behavior ahead of Stage B2 — see §11 and §12\)
 
 \*\*System:\*\* NIK YouTube Integration
 
@@ -190,7 +190,7 @@ Status: Approved for implementation planning, 2026-08-12. Not yet implemented in
 
 Enforcement branches by cost model, per §4.5's known/dynamic distinction. It is not one rule.
 
-For any known-cost operation \(§4.1: `channels.list`, `playlists.list`, `playlistItems.list`, `videos.list`, `search.list`\), the calling code must be able to demonstrate that the call is within:
+For any known-cost, shared-pool operation \(§4.1: `channels.list`, `playlists.list`, `playlistItems.list`, `videos.list`\), the calling code must be able to demonstrate that the call is within:
 
 \(a\) the per-run ceiling \(§5.1\)
 
@@ -198,9 +198,17 @@ For any known-cost operation \(§4.1: `channels.list`, `playlists.list`, `playli
 
 \(c\) any applicable cooldown requirement \(§5.3\)
 
+For `search.list` \(§4.1\), which draws from Google's own separate rolling allocation rather than the shared pool \(§4.1, §4.5\), the calling code must instead be able to demonstrate that the call is within:
+
+\(a\) the per-run ceiling \(§5.1\)
+
+\(b\) its own controlled-search policy \(§8\)
+
+`search.list` must never be checked against the daily budget in §5.2 — that budget is sized against the shared pool `search.list` does not draw from, and checking it there would be exactly the silent conflation §2 prohibits.
+
 For the dynamic-cost Analytics operation \(§4.3: `reports().query()`\), the calling code must instead be able to demonstrate that the call is within the Analytics-specific call-frequency policy \(§5.4\). This operation must never be checked against the unit-based budgets in 5.1 or 5.2 — it has no unit value to check against them.
 
-In both cases: no operation may be called solely because the calling script reached that line of code — the call must be shown to be within its applicable policy first.
+In all cases: no operation may be called solely because the calling script reached that line of code — the call must be shown to be within its applicable policy first.
 
 This directly implements the Capability Map §6 agent rule: "NO AGENT MAY PERFORM UNBOUNDED SEARCH OR REPETITIVE API POLLING." Today, no code enforces this rule anywhere in the codebase. This contract requires it. Implementing the enforcement itself is separate, future work, gated per §11 and sequenced per the staged implementation plan referenced in §12.
 
@@ -226,6 +234,12 @@ Because `enrich_video_statistics()`'s batches are built directly from the video 
 
 Status: Approved for implementation planning \(as a consequence of 7.1\), 2026-08-12. Not yet implemented in code.
 
+\### 7.3 Behavior When a Ceiling Is Reached
+
+Reaching the pagination ceiling \(§7.1\) or the batch ceiling \(§7.2\) is a governance failure, not a soft stopping point. The pre-call check for the page or batch that would exceed the ceiling must be denied \(§6\), using the same denial mechanism as any other pre-call check. The calling script must not catch this denial and degrade to emitting a snapshot built from whatever pages or batches were already fetched — it must let the failure propagate and exit without producing a snapshot, per §10. A snapshot must never be emitted as though collection completed when it was actually stopped early by this ceiling — partial data must never be represented as though it were complete data.
+
+Status: Approved 2026-08-13. Not yet implemented in code. Depends on the enforcement mechanism required by §6, which is also not yet implemented.
+
 \---
 
 \## 8. Controlled Search Requirements
@@ -234,7 +248,7 @@ Status: Approved for implementation planning \(as a consequence of 7.1\), 2026-0
 
 A controlled search policy must:
 
-\- operate under an explicit per-run and daily cap \(§5\), never an unbounded loop
+\- operate under an explicit per-run cap \(§5.1\) — the shared daily budget \(§5.2\) does not govern this operation \(§6\) — and its own controlled-search policy: a maximum of 100 calls per rolling 24-hour period, informed by Google's own separate allocation \(§4.1\) but tracked on NIK's own rolling-window basis, consistent with how §5.2 and §5.4 already measure usage; never an unbounded loop
 
 \- additionally respect Google's own separate 100-call/day bucket for this operation specifically \(§4.1\) — a NIK-internal cap alone is not sufficient, since this operation has a Google-imposed ceiling independent of NIK's own budget
 
@@ -256,11 +270,11 @@ Quota governance requires call-level telemetry that does not exist today. Per th
 
 Three options were compared: extending the existing collection log; a separate quota ledger; dedicated per-call telemetry records. A separate quota ledger was recommended and is now approved: a dedicated, append-only record that every API-calling script writes to directly, regardless of whether it was invoked via `collector.py` or standalone.
 
-\### 9.2 Ledger Schema — Finalized and Approved \(v1.1\)
+\### 9.2 Ledger Schema — Finalized and Approved \(v1.2\)
 
 The exact ledger schema, field by field, is defined in a companion document: `NIK_YOUTUBE_QUOTA_LEDGER_SCHEMA.md`. This mirrors the existing relationship between `NIK_YOUTUBE_SNAPSHOT_SCHEMA.md` and `NIK_YOUTUBE_DATA_COLLECTION_CONTRACT.md` — this contract states the governing principles; the schema document states the precise structure.
 
-Summary \(full detail in the schema document, now at v1.1\):
+Summary \(full detail in the schema document, now at v1.2\):
 
 \- Location: `logs/quota_ledger.jsonl`
 
@@ -270,7 +284,9 @@ Summary \(full detail in the schema document, now at v1.1\):
 
 \- `snapshot_id`: not attached directly to any ledger event; recoverable via `collection_id` → the matching collection log → that component's `produced_snapshot_id`.
 
-\- Known-cost pre-call events \(§4.1 operations\) carry a numeric `estimated_cost_units`; dynamic-cost pre-call events \(§4.3\) carry `estimated_cost_units: null` — the two must never be summed together.
+\- Known-cost pre-call events \(§4.1 operations\) carry a numeric `estimated_cost_units`; dynamic-cost pre-call events \(§4.3\) carry `estimated_cost_units: null` — the two must never be summed together. `search.list` events are known-cost but are excluded from the shared-pool sum entirely, per §6 — see the schema document's §10.1.
+
+\- Each pre-call event's `pre_call_check` records every ceiling that actually applies to its operation \(per-run, daily, cooldown, or the search/Analytics-specific equivalents\) as a remaining value, plus a `binding` field naming which one, if any, was the reason for a denial — never a single undifferentiated remaining-budget number.
 
 \- `actual_cost_units`, on a post-call event, is `null` until it is independently verified whether Google's API responses expose actually-consumed quota in a client-visible way.
 
@@ -278,15 +294,29 @@ Summary \(full detail in the schema document, now at v1.1\):
 
 \- A pre-call check that cannot read the ledger must fail closed \(deny the call\), not treat unreadable usage as zero usage.
 
+\- A pre-call check whose own pre-call event cannot be written must also fail closed \(deny the call, and not proceed to the API call\) — see the schema document's §10.6.
+
 \- A reader must tolerate an incomplete final line \(for example, from an interrupted write\) without failing the entire read.
 
-Status: Schema v1.1 approved 2026-08-13, resolving a pre/post-call entry lifecycle issue identified during human review of the original single-entry design \(schema v1.0\). Ledger module implementation \(Stage B1: writes, reads, and policy-calculation helpers, with no integration into any API-calling script\) is approved and was carried out the same date. Integration into the API-calling scripts \(Stage B2\) remains separately gated — see §11 and the staged implementation sequence referenced in §12.
+Status: Schema v1.1 approved 2026-08-13, resolving a pre/post-call entry lifecycle issue identified during human review of the original single-entry design \(schema v1.0\). Ledger module implementation \(Stage B1: writes, reads, and policy-calculation helpers, with no integration into any API-calling script\) is approved and was carried out the same date. Schema revised to v1.2 the same date \(Stage B2.1 reconciliation\): `pre_call_check` now records every applicable ceiling plus a `binding` field, `search.list` is excluded from the shared-pool read, and pre-call write failure is codified as fail-closed. Stage B1's committed code implements schema v1.1's shape and requires a follow-up update to match v1.2 — separate, future work, not carried out as part of this reconciliation. Integration into the API-calling scripts \(Stage B2\) remains separately gated — see §11 and the staged implementation sequence referenced in §12.
+
+\### 9.3 Collection-Log Denial Visibility
+
+Per the inspection that opened this section, today's collection log \(written by `collector.py` to `logs/collection_<timestamp>.json`\) records only `success: true/false` and output provenance for each component — it cannot distinguish a component that failed for an external reason \(an API error, a code defect\) from a component that was correctly stopped by this contract's own governance \(a pre-call denial, §6\). Both currently look identical from the collection log alone: a non-zero exit and whatever text landed in `stderr`.
+
+Once enforcement \(§6\) is implemented, each component's entry in the collection log must carry a `quota_denied` field: `true` if any pre-call event for that component's run was denied by governance, `false` otherwise. The recommended mechanism is to reuse the same `collection_id` linkage already used to recover `produced_snapshot_id` \(`NIK_YOUTUBE_SNAPSHOT_SCHEMA.md`'s provenance pass\): after a component subprocess finishes, look up whether any pre-call event for that `collection_id` was recorded with `pre_call_check.decision: "denied"` \(Ledger Schema §6.2, §9\).
+
+`quota_denied` is a boolean signal only. Detailed denial reasoning — which ceiling was binding, what the remaining budget was — is not duplicated into the collection log; it already exists in the quota ledger itself \(Ledger Schema §6.2's `binding` field\) and is reached from a collection log entry via the same `collection_id` lookup, not copied.
+
+Status: Approved 2026-08-13. Not yet implemented in code. Depends on the enforcement mechanism required by §6, which is also not yet implemented.
 
 \---
 
 \## 10. Failure Behavior \(Fail-Fast, No Retry\)
 
 All API-calling code today fails fast: a failed call raises an exception and the invoking script exits without producing a partial snapshot \(see `NIK_YOUTUBE_SNAPSHOT_SCHEMA.md`'s Implementation Note\).
+
+This fail-fast requirement applies identically when a call is stopped by this contract's own governance — a pre-call denial \(§6\), including a denial triggered by the pagination or batch ceiling \(§7.3\) — as when a call fails for an external reason such as an API error. Both must result in the invoking script exiting without producing a partial snapshot. A governance-triggered stop must never be treated as a softer case that is allowed to degrade to partial output.
 
 This contract codifies that as the current required behavior, not merely an observed one. No retry-on-failure logic may be added to any operation in §4.1 or §4.3 without first satisfying this contract's enforcement requirements \(§6\) — a retry loop added before quota governance is in place would directly reintroduce the repetitive-polling risk this contract exists to prevent.
 
@@ -336,10 +366,12 @@ Per the inspection, the only reason excessive API usage hasn't happened so far i
 
 10\. Quota ledger architecture — approved 2026-08-12. Schema revised to v1.1 and approved 2026-08-13, resolving a pre/post-call entry lifecycle issue identified during human review \(two linked events per call attempt, rather than one — see `NIK_YOUTUBE_QUOTA_LEDGER_SCHEMA.md` §4\). Full field-level schema in that document; summarized in §9.2 above.
 
+11\. Quota governance reconciliation \(Stage B2.1\) — `search.list` accounting corrected to exclude it from the shared daily budget while retaining it under the per-run ceiling and defining its own rolling-24h search allocation \(§6, §8\); pagination/batch ceiling behavior codified as a hard governance failure producing no snapshot \(§7.3, §10\); pre-call ledger write failure codified as fail-closed \(§9.2\); a collection-log denial-visibility requirement added \(§9.3, `quota_denied` field\). Approved 2026-08-13. Not yet implemented in code.
+
 \*\*Still genuinely open, not resolved by this revision:\*\*
 
-11\. Whether Google's API responses \(Data API or Analytics API\) expose actually-consumed quota per call in a client-visible way. Unverified. `actual_cost_units` remains `null` in the ledger schema until this is independently checked — this contract does not guess at an answer.
+12\. Whether Google's API responses \(Data API or Analytics API\) expose actually-consumed quota per call in a client-visible way. Unverified. `actual_cost_units` remains `null` in the ledger schema until this is independently checked — this contract does not guess at an answer.
 
 \*\*Not yet authorized regardless of the above:\*\*
 
-Enforcement code implementing any of items 5–10 is separate, future work. Approval of a policy value is not approval to write, test, or run the code that enforces it. Per human review, implementation is staged — a ledger module first, without changing any API behavior; then enforcement integration; then real-environment verification; then commit and push — and each stage requires its own separate, explicit approval before the next begins. Stage B1 \(the ledger module itself: append-only writes, reads, and policy-calculation helpers, with no integration into any API-calling script\) was approved and carried out 2026-08-13, and does not require a further per-item approval to have begun. Stage B2 \(integration into `channel_snapshot.py`, `video_inventory.py`, `analytics_snapshot.py`, `youtube_discovery.py`, and `collector.py`\) and every stage after it remain separately gated and are not yet approved.
+Enforcement code implementing any of items 5–11 is separate, future work. Approval of a policy value is not approval to write, test, or run the code that enforces it. Per human review, implementation is staged — a ledger module first, without changing any API behavior; then enforcement integration; then real-environment verification; then commit and push — and each stage requires its own separate, explicit approval before the next begins. Stage B1 \(the ledger module itself: append-only writes, reads, and policy-calculation helpers, with no integration into any API-calling script\) was approved and carried out 2026-08-13, and does not require a further per-item approval to have begun. Stage B2.1 \(contract and ledger schema reconciliation: correcting `search.list`'s accounting, codifying pagination-ceiling and pre-call-write failure behavior, and adding the collection-log denial-visibility requirement\) was also approved and carried out 2026-08-13, revising this contract to v1.4 and the companion ledger schema to v1.2 — it changed no code and authorizes none. Stage B2 \(integration into `channel_snapshot.py`, `video_inventory.py`, `analytics_snapshot.py`, `youtube_discovery.py`, and `collector.py`\) and every stage after it remain separately gated and are not yet approved.

@@ -1,8 +1,8 @@
 \# NIK YouTube Quota Ledger Schema
 
-\*\*Version:\*\* 1.1 \(Approved\)
+\*\*Version:\*\* 1.2 \(Approved\)
 
-\*\*Status:\*\* Approved 2026-08-13 — Resolves Pre/Post-Call Lifecycle Issue Identified 2026-08-12 \(v1.0's entry model is superseded by §4 below\). Ledger module implementation \(Stage B1\) is complete per this schema — see §11. Integration into any API-calling script \(Stage B2\) is separately gated and not yet approved.
+\*\*Status:\*\* Approved 2026-08-13 — v1.1's single-field `pre_call_check` shape \(§6.2\) is superseded by the multi-ceiling shape below, which also corrects `search.list`'s accounting \(§10.1\) and adds pre-call write failure handling \(§10.6\). v1.0's entry model remains superseded by §4, unchanged from v1.1. Ledger module implementation \(Stage B1\) is complete per schema v1.1 and requires a follow-up code update to match v1.2 — see §11. Integration into any API-calling script \(Stage B2\) is separately gated and not yet approved.
 
 \*\*System:\*\* NIK YouTube Integration
 
@@ -90,7 +90,7 @@ No existing bytes in the file are ever read, modified, or rewritten by a normal 
 
 \### 6.1 Fields common to both event types
 
-`ledger_schema_version` — string, e.g. `"1.1"`.
+`ledger_schema_version` — string, e.g. `"1.2"`.
 
 `entry_id` — string, UUID4. Unique to this specific line/event.
 
@@ -112,7 +112,47 @@ No existing bytes in the file are ever read, modified, or rewritten by a normal 
 
 `estimated_cost_units` — integer or `null`. `1` for known-cost operations. `null` for the dynamic-cost Analytics operation — never a guessed value.
 
-`pre_call_check` — object. For a known-cost operation: `remaining_budget_before_call` \(the computed units remaining before this call\) and `decision`. For the dynamic-cost operation: `policy` \(which Analytics-specific check ran, per Contract §5.4\) and `decision`. `decision` is `"allowed"` or `"denied"`.
+`pre_call_check` — object. Its shape depends on which policy governs the operation \(Contract §6\):
+
+For a known-cost, shared-pool operation \(`channels.list`, `playlists.list`, `playlistItems.list`, `videos.list`\):
+
+\- `remaining_run_ceiling_before_call` — integer, units remaining under Contract §5.1 before this call.
+
+\- `remaining_daily_budget_before_call` — integer, units remaining under Contract §5.2 before this call.
+
+\- `cooldown_ok` — boolean, whether Contract §5.3's cooldown is satisfied.
+
+\- `binding` — string or `null`. Names the one check that caused a denial: `"run_ceiling"`, `"daily_budget"`, or `"cooldown"`. `null` when `decision` is `"allowed"`.
+
+\- `decision` — `"allowed"` or `"denied"`.
+
+For `search.list` \(known-cost, not shared-pool — Contract §5, §6, §8\):
+
+\- `remaining_run_ceiling_before_call` — integer, units remaining under Contract §5.1 before this call.
+
+\- `remaining_search_allocation_before_call` — integer, calls remaining under Contract §8's rolling-24h search allocation before this call.
+
+\- `cooldown_ok` — boolean, whether Contract §5.3's cooldown is satisfied.
+
+\- `binding` — string or `null`: `"run_ceiling"`, `"search_allocation"`, or `"cooldown"`. `null` when `decision` is `"allowed"`.
+
+\- `decision` — `"allowed"` or `"denied"`.
+
+\- No `remaining_daily_budget_before_call` field is present on this shape — per Contract §6, this operation is never checked against §5.2.
+
+For the dynamic-cost Analytics operation \(`reports.query`, Contract §5.4\):
+
+\- `policy` — string, e.g. `"analytics_call_frequency_v1"` \(unchanged from v1.1\).
+
+\- `invocations_remaining_in_window` — integer, remaining invocations under §5.4's 12-per-rolling-24h ceiling.
+
+\- `cooldown_ok` — boolean, whether §5.4's 5-minute cooldown is satisfied.
+
+\- `binding` — string or `null`: `"per_invocation_limit"`, `"invocation_ceiling"`, or `"cooldown"`. `null` when `decision` is `"allowed"`.
+
+\- `decision` — `"allowed"` or `"denied"`.
+
+\- §5.4's third component — maximum one `reports.query()` call per invocation — is enforced as process-local state within the single running script invocation, not derived from a ledger read, and has no dedicated remaining-count field here. If it is the reason a call is denied, `binding` records `"per_invocation_limit"`, so the decision is still visible in the ledger even though nothing was read from the ledger to make it.
 
 \### 6.3 Post-call event \(`event_type: "post_call_result"`\)
 
@@ -143,30 +183,30 @@ No post-call event is ever written for a denied call, and none should ever be ex
 \### 8.1 Known-cost call, allowed, succeeded \(a linked pair\)
 
 ```json
-{"ledger_schema_version": "1.1", "entry_id": "a1111111-0000-4000-8000-000000000001", "call_id": "c1000000-0000-4000-8000-000000000001", "event_type": "pre_call_check", "timestamp_utc": "2026-08-12T18:03:11Z", "script": "video_inventory.py", "operation": "playlistItems.list", "collection_id": "98321ba3-6bf1-4e50-aa8b-8a223ccd4862", "cost_model": "known", "estimated_cost_units": 1, "pre_call_check": {"remaining_budget_before_call": 947, "decision": "allowed"}}
+{"ledger_schema_version": "1.2", "entry_id": "a1111111-0000-4000-8000-000000000001", "call_id": "c1000000-0000-4000-8000-000000000001", "event_type": "pre_call_check", "timestamp_utc": "2026-08-12T18:03:11Z", "script": "video_inventory.py", "operation": "playlistItems.list", "collection_id": "98321ba3-6bf1-4e50-aa8b-8a223ccd4862", "cost_model": "known", "estimated_cost_units": 1, "pre_call_check": {"remaining_run_ceiling_before_call": 46, "remaining_daily_budget_before_call": 947, "cooldown_ok": true, "binding": null, "decision": "allowed"}}
 ```
 
 ```json
-{"ledger_schema_version": "1.1", "entry_id": "a2222222-0000-4000-8000-000000000002", "call_id": "c1000000-0000-4000-8000-000000000001", "event_type": "post_call_result", "timestamp_utc": "2026-08-12T18:03:12Z", "outcome": "success", "error": null, "actual_cost_units": null}
+{"ledger_schema_version": "1.2", "entry_id": "a2222222-0000-4000-8000-000000000002", "call_id": "c1000000-0000-4000-8000-000000000001", "event_type": "post_call_result", "timestamp_utc": "2026-08-12T18:03:12Z", "outcome": "success", "error": null, "actual_cost_units": null}
 ```
 
 \### 8.2 Dynamic-cost Analytics call, allowed, succeeded \(a linked pair\)
 
 ```json
-{"ledger_schema_version": "1.1", "entry_id": "a3333333-0000-4000-8000-000000000003", "call_id": "c2000000-0000-4000-8000-000000000002", "event_type": "pre_call_check", "timestamp_utc": "2026-08-12T18:03:14Z", "script": "analytics_snapshot.py", "operation": "reports.query", "collection_id": "98321ba3-6bf1-4e50-aa8b-8a223ccd4862", "cost_model": "dynamic", "estimated_cost_units": null, "pre_call_check": {"policy": "analytics_call_frequency_v1", "decision": "allowed"}}
+{"ledger_schema_version": "1.2", "entry_id": "a3333333-0000-4000-8000-000000000003", "call_id": "c2000000-0000-4000-8000-000000000002", "event_type": "pre_call_check", "timestamp_utc": "2026-08-12T18:03:14Z", "script": "analytics_snapshot.py", "operation": "reports.query", "collection_id": "98321ba3-6bf1-4e50-aa8b-8a223ccd4862", "cost_model": "dynamic", "estimated_cost_units": null, "pre_call_check": {"policy": "analytics_call_frequency_v1", "invocations_remaining_in_window": 11, "cooldown_ok": true, "binding": null, "decision": "allowed"}}
 ```
 
 ```json
-{"ledger_schema_version": "1.1", "entry_id": "a4444444-0000-4000-8000-000000000004", "call_id": "c2000000-0000-4000-8000-000000000002", "event_type": "post_call_result", "timestamp_utc": "2026-08-12T18:03:16Z", "outcome": "success", "error": null, "actual_cost_units": null}
+{"ledger_schema_version": "1.2", "entry_id": "a4444444-0000-4000-8000-000000000004", "call_id": "c2000000-0000-4000-8000-000000000002", "event_type": "post_call_result", "timestamp_utc": "2026-08-12T18:03:16Z", "outcome": "success", "error": null, "actual_cost_units": null}
 ```
 
 \### 8.3 Denied call \(pre-call event only — no post-call event follows, ever\)
 
 ```json
-{"ledger_schema_version": "1.1", "entry_id": "a5555555-0000-4000-8000-000000000005", "call_id": "c3000000-0000-4000-8000-000000000003", "event_type": "pre_call_check", "timestamp_utc": "2026-08-12T18:05:00Z", "script": "youtube_discovery.py", "operation": "search.list", "collection_id": null, "cost_model": "known", "estimated_cost_units": 1, "pre_call_check": {"remaining_budget_before_call": 3, "decision": "denied"}}
+{"ledger_schema_version": "1.2", "entry_id": "a5555555-0000-4000-8000-000000000005", "call_id": "c3000000-0000-4000-8000-000000000003", "event_type": "pre_call_check", "timestamp_utc": "2026-08-12T18:05:00Z", "script": "youtube_discovery.py", "operation": "search.list", "collection_id": null, "cost_model": "known", "estimated_cost_units": 1, "pre_call_check": {"remaining_run_ceiling_before_call": 46, "remaining_search_allocation_before_call": 0, "cooldown_ok": true, "binding": "search_allocation", "decision": "denied"}}
 ```
 
-A reader must never sum `estimated_cost_units` across `cost_model: "known"` and `cost_model: "dynamic"` pre-call events as a single number, and must never count a `"denied"` pre-call event toward consumed budget — unchanged from v1.0's known/dynamic separation, now stated in terms of pre-call events specifically.
+A reader must never sum `estimated_cost_units` across `cost_model: "known"` and `cost_model: "dynamic"` pre-call events as a single number, and must never count a `"denied"` pre-call event toward consumed budget — unchanged from v1.0's known/dynamic separation, now stated in terms of pre-call events specifically. A reader must also never sum a `search.list` pre-call event's `estimated_cost_units` into the shared-pool known-cost total — see §10.1.
 
 \---
 
@@ -178,6 +218,8 @@ Where a specific call's associated snapshot needs to be identified, the path is:
 
 Standalone entries \(`collection_id: null`\) have no collection log to join to, and therefore no recoverable `snapshot_id` — consistent with how standalone snapshots already behave today.
 
+The same `collection_id` linkage also supports the reverse lookup: given a collection log entry for one component, a reader can find every ledger event recorded for that `collection_id` and that component's `script`/`operation`, including any `"denied"` pre-call event — see Quota Governance Contract §9.3, which defines the resulting `quota_denied` field on each collection log entry.
+
 \---
 
 \## 10. Read Behavior, Orphan Handling, and Failure Handling
@@ -186,7 +228,7 @@ Standalone entries \(`collection_id: null`\) have no collection log to join to, 
 
 A reader computing current usage for a pre-call check considers only events where `event_type` is `"pre_call_check"` and `pre_call_check.decision` is `"allowed"`, filtered to `timestamp_utc` within the applicable rolling 24-hour window \(Quota Governance Contract §5.2\), not by calendar day.
 
-For known-cost usage: sum `estimated_cost_units` across those filtered events.
+For known-cost, shared-pool usage: sum `estimated_cost_units` across those filtered events, excluding `search.list` — `search.list` draws from a separate Google-side allocation \(Quota Governance Contract §4.1\) and must never be added into the shared-pool sum this section computes \(Quota Governance Contract §2, §5.2\). A reader computing `search.list`'s own usage does so separately: count pre-call-allowed events where `operation` is `"search.list"`, within the same rolling 24-hour window, using the same allowed-only pre-call-event filter as this section's other computations.
 
 For the Analytics call-frequency policy \(Contract §5.4\): count those filtered events for `analytics_snapshot.py` / `reports.query`, and separately check the most recent such event's `timestamp_utc` against the 5-minute cooldown.
 
@@ -212,6 +254,10 @@ Unchanged from v1.0. If the file is missing, unreadable, or otherwise inaccessib
 
 If the API call succeeds \(or fails\) but the subsequent post-call write itself fails, the calling code must surface this clearly, consistent with the Quota Governance Contract's §10 fail-fast principle, rather than silently continuing as though the result had been recorded. Note that this specific failure mode no longer hides whether the call was attempted at all — the pre-call event already exists on disk by this point, per §4 through §5. What could be lost is only the outcome detail, not the fact of the attempt.
 
+\### 10.6 Pre-call write failure
+
+If the pre-call event itself cannot be written — the same class of reasons §10.4 treats as fail-closed for reads \(the ledger file or its containing directory is missing, unreadable, or otherwise inaccessible\) — the calling code must not proceed to make the API call. This is symmetric with §10.4: an unreadable ledger must deny a call rather than treat unreadable usage as zero; an unwritable ledger must equally deny a call rather than make an API call that could never be recorded, not even as an orphaned attempt \(§10.2\). An orphaned attempt still has a pre-call event for the arithmetic in §10.1 to count; a call made despite a failed pre-call write would have no event at all — a strictly worse gap than any this schema otherwise tolerates.
+
 \---
 
 \## 11. Implementation Note
@@ -223,5 +269,7 @@ Two implementation decisions went beyond this document's literal text and were f
 \- A ledger file that has never been created is treated as zero prior entries \(not a §10.4 fail-closed case\), to avoid a bootstrap deadlock where the first-ever call could never succeed in creating the first entry. A ledger that exists but cannot be read remains a §10.4 fail-closed case.
 
 \- A malformed line that is \*\*not\*\* the final line raises a read error rather than being silently skipped, since §10.3's tolerance is specifically for an interrupted final write, not unexplained mid-file corruption.
+
+Stage B2.1 \(2026-08-13\) revised this schema from v1.1 to v1.2: §6.2's `pre_call_check` shape now records every applicable ceiling's remaining value plus a `binding` field instead of one undifferentiated `remaining_budget_before_call`; §10.1 excludes `search.list` from the shared-pool known-cost sum; §10.6 adds pre-call write failure handling. Stage B1's committed `write_pre_call_event()` still implements v1.1's single-field shape, and `compute_known_cost_usage()` still includes `search.list` in its sum — both now need a follow-up code change to match this schema. That code change is separate, future work requiring its own explicit approval, not carried out as part of this reconciliation pass.
 
 Stage B2 \(integration into the four API-calling scripts, and actual enforcement of the Sec 5 policy limits\) is separate, future work requiring its own explicit approval, per the Quota Governance Contract §12.
