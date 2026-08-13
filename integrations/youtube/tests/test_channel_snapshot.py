@@ -1,9 +1,15 @@
+from datetime import timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 import sys
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from channel_snapshot import build_snapshot
+import channel_snapshot
+import quota_ledger
+from channel_snapshot import QuotaDeniedError, build_snapshot
 
 
 SAMPLE_CHANNEL = {
@@ -135,3 +141,234 @@ def test_build_snapshot_missing_statistics_field_still_defaults_to_zero():
     snapshot = build_snapshot(channel_missing_view_count)
 
     assert snapshot["channel"]["statistics"]["view_count"] == 0
+
+
+# ---------------------------------------------------------
+# get_channel() -- quota governance integration (Stage B2.2b)
+# ---------------------------------------------------------
+
+SAMPLE_CHANNEL_RESPONSE = {"items": [SAMPLE_CHANNEL]}
+
+
+def _fake_youtube(response=None, raises=None):
+    """
+    A minimal stand-in for the googleapiclient youtube resource, deep
+    enough to support youtube.channels().list(...).execute().
+    """
+    youtube = MagicMock()
+    execute = youtube.channels.return_value.list.return_value.execute
+    if raises is not None:
+        execute.side_effect = raises
+    else:
+        execute.return_value = response
+    return youtube
+
+
+def _seed_known_cost_usage(path, estimated_cost_units, script="other_script.py"):
+    """
+    Appends one allowed known-cost pre_call_check event carrying an
+    arbitrary estimated_cost_units, so compute_known_cost_usage() can
+    be pushed to a chosen total without writing hundreds of individual
+    entries. write_pre_call_event() does not validate
+    estimated_cost_units's value, so this is a safe test shortcut, not
+    a shape any production code would actually write.
+    """
+    quota_ledger.write_pre_call_event(
+        script=script,
+        operation="channels.list",
+        collection_id=None,
+        cost_model=quota_ledger.KNOWN_COST_MODEL,
+        estimated_cost_units=estimated_cost_units,
+        pre_call_check={
+            "remaining_run_ceiling_before_call": 1,
+            "remaining_daily_budget_before_call": 1,
+            "cooldown_ok": True,
+            "binding": None,
+            "decision": quota_ledger.ALLOWED,
+        },
+        path=path,
+    )
+
+
+# --- _evaluate_known_cost_pre_call_check() --------------------------
+
+def test_pre_call_check_allowed_when_all_three_checks_pass(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+
+    result = channel_snapshot._evaluate_known_cost_pre_call_check(
+        run_ceiling_used=0, script="channel_snapshot.py", path=ledger_path
+    )
+
+    assert result["decision"] == "allowed"
+    assert result["binding"] is None
+    assert result["remaining_run_ceiling_before_call"] == 50
+    assert result["remaining_daily_budget_before_call"] == 1000
+    assert result["cooldown_ok"] is True
+
+
+def test_pre_call_check_denied_run_ceiling_when_process_local_usage_reaches_ceiling(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+
+    result = channel_snapshot._evaluate_known_cost_pre_call_check(
+        run_ceiling_used=50, script="channel_snapshot.py", path=ledger_path
+    )
+
+    assert result["decision"] == "denied"
+    assert result["binding"] == "run_ceiling"
+    assert result["remaining_run_ceiling_before_call"] == 0
+
+
+def test_pre_call_check_denied_daily_budget_when_shared_pool_usage_at_ceiling(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    _seed_known_cost_usage(ledger_path, estimated_cost_units=1000)
+
+    result = channel_snapshot._evaluate_known_cost_pre_call_check(
+        run_ceiling_used=0, script="channel_snapshot.py", path=ledger_path
+    )
+
+    assert result["decision"] == "denied"
+    assert result["binding"] == "daily_budget"
+    assert result["remaining_daily_budget_before_call"] == 0
+
+
+def test_pre_call_check_denied_cooldown_when_last_invocation_too_recent(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    # A real invocation of this same script, written moments ago.
+    channel_snapshot.get_channel(
+        _fake_youtube(response=SAMPLE_CHANNEL_RESPONSE), path=ledger_path
+    )
+
+    result = channel_snapshot._evaluate_known_cost_pre_call_check(
+        run_ceiling_used=0, script="channel_snapshot.py", path=ledger_path
+    )
+
+    assert result["decision"] == "denied"
+    assert result["binding"] == "cooldown"
+    assert result["cooldown_ok"] is False
+
+
+def test_pre_call_check_cooldown_ok_when_last_invocation_old_enough(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    channel_snapshot.get_channel(
+        _fake_youtube(response=SAMPLE_CHANNEL_RESPONSE), path=ledger_path
+    )
+
+    later = quota_ledger.utc_now() + timedelta(minutes=6)
+    result = channel_snapshot._evaluate_known_cost_pre_call_check(
+        run_ceiling_used=0, script="channel_snapshot.py", path=ledger_path, now=later
+    )
+
+    assert result["cooldown_ok"] is True
+    assert result["decision"] == "allowed"
+
+
+def test_pre_call_check_run_ceiling_checked_before_daily_budget(tmp_path):
+    """
+    Contract Sec 6 lists the per-run ceiling (a) before the daily
+    budget (b); when both would deny the same call, binding should
+    name the first one, not the second.
+    """
+    ledger_path = tmp_path / "ledger.jsonl"
+    _seed_known_cost_usage(ledger_path, estimated_cost_units=1000)
+
+    result = channel_snapshot._evaluate_known_cost_pre_call_check(
+        run_ceiling_used=50, script="channel_snapshot.py", path=ledger_path
+    )
+
+    assert result["decision"] == "denied"
+    assert result["binding"] == "run_ceiling"
+
+
+# --- get_channel() ---------------------------------------------------
+
+def test_get_channel_allowed_executes_api_call_and_returns_channel(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    youtube = _fake_youtube(response=SAMPLE_CHANNEL_RESPONSE)
+
+    channel = channel_snapshot.get_channel(youtube, path=ledger_path)
+
+    assert channel == SAMPLE_CHANNEL
+    youtube.channels.return_value.list.return_value.execute.assert_called_once()
+
+
+def test_get_channel_denied_does_not_execute_api_call(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    youtube = _fake_youtube(response=SAMPLE_CHANNEL_RESPONSE)
+
+    with pytest.raises(QuotaDeniedError):
+        channel_snapshot.get_channel(youtube, run_ceiling_used=50, path=ledger_path)
+
+    youtube.channels.return_value.list.return_value.execute.assert_not_called()
+
+    entries = quota_ledger.read_entries(path=ledger_path)
+    assert len(entries) == 1
+    assert entries[0]["event_type"] == "pre_call_check"
+    assert entries[0]["pre_call_check"]["decision"] == "denied"
+    assert entries[0]["pre_call_check"]["binding"] == "run_ceiling"
+
+
+def test_get_channel_ledger_write_failure_prevents_api_call(tmp_path, monkeypatch):
+    ledger_path = tmp_path / "ledger.jsonl"
+    youtube = _fake_youtube(response=SAMPLE_CHANNEL_RESPONSE)
+
+    def _raise(*args, **kwargs):
+        raise OSError("simulated pre-call ledger write failure")
+
+    monkeypatch.setattr(channel_snapshot.quota_ledger, "write_pre_call_event", _raise)
+
+    with pytest.raises(OSError):
+        channel_snapshot.get_channel(youtube, path=ledger_path)
+
+    youtube.channels.return_value.list.return_value.execute.assert_not_called()
+
+
+def test_get_channel_successful_call_writes_success_post_call_event(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    youtube = _fake_youtube(response=SAMPLE_CHANNEL_RESPONSE)
+
+    channel_snapshot.get_channel(youtube, path=ledger_path)
+
+    entries = quota_ledger.read_entries(path=ledger_path)
+    pre = next(e for e in entries if e["event_type"] == "pre_call_check")
+    post = next(e for e in entries if e["event_type"] == "post_call_result")
+
+    assert len(entries) == 2
+    assert post["call_id"] == pre["call_id"]
+    assert post["outcome"] == "success"
+    assert post["error"] is None
+
+
+def test_get_channel_failed_api_call_writes_failure_post_call_event(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    youtube = _fake_youtube(raises=RuntimeError("simulated API failure"))
+
+    with pytest.raises(RuntimeError, match="simulated API failure"):
+        channel_snapshot.get_channel(youtube, path=ledger_path)
+
+    entries = quota_ledger.read_entries(path=ledger_path)
+    post = next(e for e in entries if e["event_type"] == "post_call_result")
+
+    assert post["outcome"] == "failure"
+    assert "simulated API failure" in post["error"]
+
+
+def test_get_channel_passes_collection_id_through_to_pre_call_event(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    youtube = _fake_youtube(response=SAMPLE_CHANNEL_RESPONSE)
+
+    channel_snapshot.get_channel(
+        youtube, collection_id="a-collection-run-id", path=ledger_path
+    )
+
+    entries = quota_ledger.read_entries(path=ledger_path)
+    pre = next(e for e in entries if e["event_type"] == "pre_call_check")
+
+    assert pre["collection_id"] == "a-collection-run-id"
+
+
+def test_get_channel_raises_when_no_channel_in_response(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    youtube = _fake_youtube(response={"items": []})
+
+    with pytest.raises(RuntimeError, match="No YouTube channel was found"):
+        channel_snapshot.get_channel(youtube, path=ledger_path)
