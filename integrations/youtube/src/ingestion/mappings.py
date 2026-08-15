@@ -522,3 +522,193 @@ def map_channel_analytics_snapshot(doc, source_file):
         "retrieval_metadata": doc["retrieval_metadata"],
         "source_file": source_file,
     }
+
+
+# ---------------------------------------------------------------------
+# change_detection_events  (NIK_YOUTUBE_SUPABASE_EVIDENCE_SCHEMA_DESIGN.md
+# Sec 8.5; NIK_YOUTUBE_B2_3_5_CHANGE_DETECTION_INGESTION_DESIGN.md Sec 5.1/5.2)
+# ---------------------------------------------------------------------
+#
+# The first table in this schema where one source file maps to N rows,
+# not one -- see map_change_detection_events() below. Snapshot-ID
+# resolution (previous_snapshot_id/current_snapshot_id) is deliberately
+# NOT part of this module -- see resolve_channel_snapshot_ids() in
+# change_detection_ingest.py (design doc Sec 5.3). Everything here
+# remains a pure function of its input, no I/O, no network, no
+# Supabase, same as every function above this one in this file.
+
+REQUIRED_CHANGE_DETECTION_KEYS = (
+    "schema_version",
+    "snapshot_type",
+    "generated_at_utc",
+    "entity_type",
+)
+
+CHANGE_TYPE_VALUES = ("UNCHANGED", "CHANGED", "UNAVAILABLE")
+EVIDENCE_CLASS_VALUES = ("OBSERVED", "DERIVED", "INTERPRETATION", "ASSUMPTION")
+
+
+def _validate_snapshot_reference(doc, key, problems):
+    """
+    Shared shape check for doc['previous_snapshot']/doc['current_snapshot']
+    -- both must be an object with a non-empty 'path' and a
+    'generated_at_utc' that parses as a timestamp. The two fields are
+    identically shaped (design doc Sec 5.1), so this is one helper, not
+    two near-duplicate blocks.
+    """
+    ref = doc.get(key)
+    if not isinstance(ref, dict):
+        problems.append(f"missing required field: {key!r} (must be an object)")
+        return
+
+    if ref.get("path") in (None, ""):
+        problems.append(f"missing required field: '{key}.path'")
+
+    if ref.get("generated_at_utc") in (None, ""):
+        problems.append(f"missing required field: '{key}.generated_at_utc'")
+    elif not _is_valid_timestamp(ref["generated_at_utc"]):
+        problems.append(
+            f"{key}.generated_at_utc does not parse as a timestamp: {ref['generated_at_utc']!r}"
+        )
+
+
+def validate_change_detection_events(doc):
+    """
+    Same collect-every-problem, name-every-field posture as every prior
+    validator in this module (design doc Sec 5.1).
+
+    Per Decision 4 (design doc Sec 4/Sec 5.1): a present-but-empty
+    'changes' array is rejected as a validation failure, not accepted
+    as a valid zero-row ingestion. compare_channel() always produces
+    exactly three entries today, so this path is unreachable from real
+    output -- this is a defensive, fail-closed rule for hypothetical
+    malformed input.
+
+    Per Decision 5 (design doc Sec 4/Sec 5.1): every entry in 'changes'
+    must share one entity_type/entity_id across the whole array --
+    named explicitly as its own problem if violated, not silently
+    resolved against the first entry only. This is required because
+    snapshot-ID resolution (Sec 5.3) resolves once per file, not once
+    per row -- it depends on every row describing the same entity.
+    change_detection.py's current output already satisfies this by
+    construction; this makes it an enforced contract rather than an
+    unstated assumption.
+
+    previous_value/current_value/absolute_change/percentage_change are
+    deliberately not checked for presence or type here -- all four are
+    legitimately nullable numeric columns (exactly what UNAVAILABLE/
+    zero-baseline comparisons look like), and are read with .get() in
+    map_change_detection_events() below, same treatment as
+    collection_id elsewhere in this module.
+    """
+    problems = []
+
+    for key in REQUIRED_CHANGE_DETECTION_KEYS:
+        if doc.get(key) in (None, ""):
+            problems.append(f"missing required field: {key!r}")
+
+    _validate_snapshot_reference(doc, "previous_snapshot", problems)
+    _validate_snapshot_reference(doc, "current_snapshot", problems)
+
+    if doc.get("generated_at_utc") and not _is_valid_timestamp(doc["generated_at_utc"]):
+        problems.append(f"generated_at_utc does not parse as a timestamp: {doc['generated_at_utc']!r}")
+
+    if doc.get("snapshot_type") not in (None, "youtube_change_detection"):
+        problems.append(f"snapshot_type must be 'youtube_change_detection', got {doc['snapshot_type']!r}")
+
+    changes = doc.get("changes")
+    if not isinstance(changes, list):
+        problems.append("missing required field: 'changes' (must be an array)")
+        changes = []
+    elif not changes:
+        problems.append("'changes' must not be empty")
+
+    entity_keys_seen = set()
+    for index, entry in enumerate(changes):
+        if not isinstance(entry, dict):
+            problems.append(f"changes[{index}] must be an object, got {type(entry).__name__}")
+            continue
+
+        for field in ("entity_type", "entity_id", "metric"):
+            if entry.get(field) in (None, ""):
+                problems.append(f"changes[{index}] missing required field: {field!r}")
+
+        if entry.get("change_type") not in CHANGE_TYPE_VALUES:
+            problems.append(
+                f"changes[{index}].change_type must be one of {CHANGE_TYPE_VALUES}, "
+                f"got {entry.get('change_type')!r}"
+            )
+
+        if entry.get("evidence_class") not in EVIDENCE_CLASS_VALUES:
+            problems.append(
+                f"changes[{index}].evidence_class must be one of {EVIDENCE_CLASS_VALUES}, "
+                f"got {entry.get('evidence_class')!r}"
+            )
+
+        entity_keys_seen.add((entry.get("entity_type"), entry.get("entity_id")))
+
+    if len(entity_keys_seen) > 1:
+        problems.append(
+            "changes[] entries reference more than one entity -- resolution requires "
+            f"exactly one (found: {sorted(str(k) for k in entity_keys_seen)!r})"
+        )
+
+    if problems:
+        raise IngestRejected(
+            f"change detection events failed validation ({len(problems)} problem(s)): "
+            + "; ".join(problems)
+        )
+
+
+def map_change_detection_events(doc, source_file):
+    """
+    NIK_YOUTUBE_B2_3_5_CHANGE_DETECTION_INGESTION_DESIGN.md Sec 5.2.
+    Returns a LIST of row dicts, one per doc['changes'][i] -- the first
+    mapping function in this module with that shape; caller must run
+    validate_change_detection_events(doc) first, including its Decision
+    5 single-entity-per-file guarantee, which this function assumes
+    rather than re-checks.
+
+    One detection_run_id (str(uuid.uuid4()), Decision 6) is generated
+    once per call and shared identically across every dict in the
+    returned list -- it identifies this ingestion run as a whole, not
+    any individual metric, and does not need to be deterministic or
+    content-derived because idempotency is enforced entirely at the
+    (source_file, metric) level (Sec 5.6), not through this column.
+
+    schema_version, generated_at_utc (the comparison run's OWN
+    timestamp -- not either snapshot's), previous_snapshot_source/
+    current_snapshot_source (doc['previous_snapshot']/doc['current_snapshot'],
+    preserved verbatim per schema doc Sec 6.6's lossless-preservation
+    requirement), and source_file are identical across every row in the
+    list, since they describe the run, not the individual metric.
+
+    Deliberately does NOT include previous_snapshot_id/current_snapshot_id
+    in its output -- see resolve_channel_snapshot_ids() in
+    change_detection_ingest.py (Sec 5.3). This function is a pure
+    function of its input, same as every prior mapping function in this
+    module; DB-dependent resolution is layered on separately, by the
+    ingestion adapter, not folded into this function.
+    """
+    detection_run_id = str(uuid.uuid4())
+
+    rows = []
+    for entry in doc["changes"]:
+        rows.append({
+            "detection_run_id": detection_run_id,
+            "schema_version": doc["schema_version"],
+            "generated_at_utc": doc["generated_at_utc"],
+            "entity_type": entry["entity_type"],
+            "entity_id": entry["entity_id"],
+            "metric": entry["metric"],
+            "previous_value": entry.get("previous_value"),
+            "current_value": entry.get("current_value"),
+            "change_type": entry["change_type"],
+            "absolute_change": entry.get("absolute_change"),
+            "percentage_change": entry.get("percentage_change"),
+            "evidence_class": entry["evidence_class"],
+            "previous_snapshot_source": doc["previous_snapshot"],
+            "current_snapshot_source": doc["current_snapshot"],
+            "source_file": source_file,
+        })
+    return rows
